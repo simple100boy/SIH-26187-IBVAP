@@ -1,0 +1,31 @@
+# Ignore large video files in data/videos/
+data/videos/*.mp4
+data/videos/*.avi
+data/videos/*.mkv
+data/videos/*.mov
+!data/videos/README.txt
+
+# Python bytecode / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Database & evidence snapshots
+data/*.db
+data/snapshots/*
+!data/snapshots/.gitkeep
+scratch/
+
+# Environments & IDEs
+.env
+.venv/
+env/
+venv/
+.idea/
+.vscode/
+
+# OS specific
+.DS_Store
+Thumbs.db
