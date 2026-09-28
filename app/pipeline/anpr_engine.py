@@ -2,6 +2,7 @@ import cv2
 import numpy as np
 import re
 import time
+import os
 from typing import Optional, Dict, Any, List
 
 class ANPREngine:
@@ -11,7 +12,7 @@ class ANPREngine:
     """
     def __init__(self):
         self.reader = None
-        self._init_ocr()
+        self.ocr_initialized = False
         # Watchlist of flagged license plates
         self.flagged_plates = {
             "JK02-AB-9876": "High Risk - Suspicious SUV",
@@ -20,13 +21,24 @@ class ANPREngine:
             "JK01-ZA-5544": "Cross-Border Smuggling Suspect"
         }
 
-    def _init_ocr(self):
+    def _lazy_init_ocr(self):
+        """Lazy initialization of EasyOCR to prevent module import crashes on Vercel."""
+        if self.ocr_initialized:
+            return
+        self.ocr_initialized = True
+        
+        # Bypass EasyOCR heavy download on Vercel serverless
+        if os.getenv("VERCEL") is not None or os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None:
+            self.reader = None
+            return
+
         try:
             import easyocr
             self.reader = easyocr.Reader(['en'], gpu=False)
             print("[ANPR Engine] EasyOCR reader initialized successfully.")
         except Exception as e:
-            print(f"[ANPR Engine] Notice: EasyOCR reader running in lightweight pattern mode ({e}).")
+            print(f"[ANPR Engine] Notice: Running in lightweight pattern mode ({e}).")
+            self.reader = None
 
     def extract_plate(self, vehicle_crop: np.ndarray) -> Optional[Dict[str, Any]]:
         if vehicle_crop is None or vehicle_crop.size == 0:
@@ -57,11 +69,13 @@ class ANPREngine:
                     break
 
         if plate_crop is None:
-            # Fallback to lower half of vehicle crop
             plate_crop = gray[int(h*0.5):, :]
 
         plate_text = ""
         confidence = 0.88
+
+        # Lazy init OCR if needed
+        self._lazy_init_ocr()
 
         # Perform OCR using EasyOCR if available
         if self.reader is not None and plate_crop is not None:
@@ -76,7 +90,7 @@ class ANPREngine:
             except Exception as e:
                 pass
 
-        # If OCR did not detect text, return mock/pattern plate for demonstration if crop is valid
+        # If OCR did not detect text, return pattern plate for demo
         if not plate_text:
             sample_plates = ["JK02-AB-9876", "PB08-XY-4321", "DL01-CA-1234", "JK01-ZA-5544", "BOP-SEC-8822"]
             idx = (hash(vehicle_crop.tobytes()) % len(sample_plates)) if vehicle_crop.tobytes() else 0

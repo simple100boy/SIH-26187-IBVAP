@@ -3,13 +3,23 @@ from pathlib import Path
 
 # Base Paths
 BASE_DIR = Path(__file__).resolve().parent.parent
-DATA_DIR = BASE_DIR / "data"
-SNAPSHOT_DIR = DATA_DIR / "snapshots"
-DB_PATH = DATA_DIR / "ibvap.db"
 
-# Create directories if they don't exist
-DATA_DIR.mkdir(exist_ok=True)
-SNAPSHOT_DIR.mkdir(exist_ok=True)
+# Detect Vercel Serverless environment
+IS_VERCEL = os.getenv("VERCEL") is not None or os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None
+
+if IS_VERCEL:
+    # On Vercel, writeable files must reside in /tmp
+    DATA_DIR = Path("/tmp/data")
+    SNAPSHOT_DIR = Path("/tmp/snapshots")
+    DB_PATH = Path("/tmp/ibvap.db")
+else:
+    DATA_DIR = BASE_DIR / "data"
+    SNAPSHOT_DIR = DATA_DIR / "snapshots"
+    DB_PATH = DATA_DIR / "ibvap.db"
+
+# Create directories safely
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Application Settings
 APP_TITLE = "IBVAP - Intelligent Border Video Analytics Platform"
@@ -18,7 +28,7 @@ HOST = "0.0.0.0"
 PORT = 8000
 
 # Model & AI Config
-YOLO_MODEL_NAME = "yolo11n.pt"  # Will fallback to yolov8n or synthetic CV if offline
+YOLO_MODEL_NAME = "yolo11n.pt"
 CONFIDENCE_THRESHOLD = 0.45
 IOU_THRESHOLD = 0.40
 

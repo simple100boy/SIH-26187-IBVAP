@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 import time
+import os
 from typing import List, Dict, Any, Tuple
 from app.config import YOLO_MODEL_NAME, CONFIDENCE_THRESHOLD, DETECTION_CLASSES
 
@@ -54,7 +55,6 @@ class SimpleIoUTracker:
         current_time = time.time()
         updated_tracks = []
 
-        # Remove stale tracks
         stale_ids = [
             tid for tid, track in self.tracks.items()
             if current_time - track.last_seen > 1.5
@@ -62,7 +62,6 @@ class SimpleIoUTracker:
         for tid in stale_ids:
             del self.tracks[tid]
 
-        # Match detections to existing tracks
         unmatched_dets = list(range(len(detections)))
         matched_tracks = set()
 
@@ -88,7 +87,6 @@ class SimpleIoUTracker:
                 updated_tracks.append(self.tracks[best_tid])
                 unmatched_dets.remove(det_idx)
 
-        # Create new tracks for remaining detections
         for det_idx in unmatched_dets:
             det = detections[det_idx]
             tid = self.next_id
@@ -108,9 +106,18 @@ class ObjectDetector:
         self.model = None
         self.tracker = SimpleIoUTracker()
         self.is_yolo_loaded = False
-        self._try_load_yolo()
+        self.yolo_attempted = False
 
-    def _try_load_yolo(self):
+    def _lazy_load_yolo(self):
+        if self.yolo_attempted:
+            return
+        self.yolo_attempted = True
+
+        # Skip heavy PyTorch YOLO downloads on Vercel Serverless
+        if os.getenv("VERCEL") is not None or os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None:
+            self.is_yolo_loaded = False
+            return
+
         try:
             from ultralytics import YOLO
             self.model = YOLO(YOLO_MODEL_NAME)
@@ -125,6 +132,8 @@ class ObjectDetector:
 
         h, w = frame.shape[:2]
         detections = []
+
+        self._lazy_load_yolo()
 
         if self.is_yolo_loaded and self.model is not None:
             try:
@@ -144,24 +153,14 @@ class ObjectDetector:
             except Exception as e:
                 pass
 
-        # Fallback Vision Analytics if YOLO did not yield objects on synthetic frame
         if len(detections) == 0:
             detections = self._heuristic_vision_detector(frame, w, h)
 
-        # Update ByteTrack tracker
         tracked_objects = self.tracker.update(detections)
         return tracked_objects, detections
 
     def _heuristic_vision_detector(self, frame: np.ndarray, w: int, h: int) -> List[Dict[str, Any]]:
-        """
-        High-precision color/contour motion detector to ensure guaranteed 100% video analytics
-        even when running without GPU / pre-downloaded YOLO weights.
-        """
         dets = []
-        # Convert to HSV to detect target motion shapes
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-
-        # Detect human figures (light greenish/white hues in night scene or dark hoodies)
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (5, 5), 0)
         thresh = cv2.adaptiveThreshold(blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 11, 2)
@@ -174,13 +173,12 @@ class ObjectDetector:
                 x, y, bw, bh = cv2.boundingRect(c)
                 aspect = bh / float(bw)
 
-                # Skip header HUD bar area
                 if y < 45 or y + bh > h - 10:
                     continue
 
-                if aspect > 1.3: # Vertical aspect -> Person
+                if aspect > 1.3:
                     label = "person"
-                elif 0.5 <= aspect <= 1.3 and bw > 60: # Horizontal aspect -> Vehicle
+                elif 0.5 <= aspect <= 1.3 and bw > 60:
                     label = "car"
                 else:
                     label = "person"
@@ -192,4 +190,4 @@ class ObjectDetector:
                     "class_id": 0 if label == "person" else 2
                 })
 
-        return dets[:5] # Top 5 objects
+        return dets[:5]
