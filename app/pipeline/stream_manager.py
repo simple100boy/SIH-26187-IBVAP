@@ -58,7 +58,6 @@ class CameraStreamProcessor:
     def _resolve_video_path(self) -> Optional[Path]:
         """Resolves local MP4 video file path in data/videos/ directory."""
         video_dir = DATA_DIR / "videos"
-        # Check specific filename or camera ID
         possible_files = [
             video_dir / f"{self.camera_id}.mp4",
             video_dir / f"{self.camera_id.replace('-', '_')}.mp4",
@@ -104,19 +103,14 @@ class CameraStreamProcessor:
             self.thread.join(timeout=2.0)
 
     def _read_next_frame(self) -> Tuple[np.ndarray, bool]:
-        """
-        Reads frame from real MP4 video file or renders offline placeholder if offline/missing.
-        """
-        # Recheck video path if not open
+        """Reads frame from real MP4 video file or renders offline placeholder."""
         if self.video_file_path is None:
             self.video_file_path = self._resolve_video_path()
 
         if self.status == "OFFLINE" or self.video_file_path is None or not self.video_file_path.exists():
-            # Generate IBVAP Camera Offline Card Frame (Matching CAM-06 screenshot layout)
             offline_frame = np.zeros((360, 640, 3), dtype=np.uint8)
             offline_frame[:, :] = (10, 14, 20)
 
-            # Draw camera offline icon circle
             cv2.circle(offline_frame, (320, 150), 30, (40, 50, 60), 2)
             cv2.line(offline_frame, (310, 140), (330, 160), (40, 50, 60), 2)
             cv2.line(offline_frame, (330, 140), (310, 160), (40, 50, 60), 2)
@@ -127,163 +121,46 @@ class CameraStreamProcessor:
 
             return offline_frame, False
 
-        # Open video capture if not opened
         if self.cap is None or not self.cap.isOpened():
             self.cap = cv2.VideoCapture(str(self.video_file_path))
 
         ret, frame = self.cap.read()
-
         if not ret:
-            # Video reached end -> loop back to frame 0
             self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
             ret, frame = self.cap.read()
 
         if not ret or frame is None:
-            # Fallback black frame
             frame = np.zeros((360, 640, 3), dtype=np.uint8)
             return frame, False
 
-        # Resize to standard processing dimensions
         frame = cv2.resize(frame, (640, 360))
         return frame, True
+
+    def process_single_frame(self) -> np.ndarray:
+        """Processes a single frame on demand (for serverless execution)."""
+        raw_frame, is_live = self._read_next_frame()
+        if not is_live:
+            return raw_frame
+
+        h, w = raw_frame.shape[:2]
+        if self.night_enhancement:
+            enhanced_frame = night_enhancer.enhance_low_light(raw_frame)
+            work_frame = night_enhancer.apply_thermal_palette(enhanced_frame, self.thermal_palette)
+        else:
+            work_frame = raw_frame.copy()
+
+        display_frame = work_frame.copy()
+        self._draw_zones(display_frame, w, h)
+        return display_frame
 
     def _run_pipeline(self):
         while self.running:
             loop_start = time.time()
-
-            raw_frame, is_live = self._read_next_frame()
-            h, w = raw_frame.shape[:2]
-
-            if not is_live:
-                # Offline stream frame
-                with self.lock:
-                    self.processed_frame = raw_frame
-                time.sleep(0.1)
-                continue
-
-            # 1. Low-Light & Thermal Enhancement if enabled
-            if self.night_enhancement:
-                enhanced_frame = night_enhancer.enhance_low_light(raw_frame)
-                work_frame = night_enhancer.apply_thermal_palette(enhanced_frame, self.thermal_palette)
-            else:
-                work_frame = raw_frame.copy()
-
-            display_frame = work_frame.copy()
-
-            # 2. Draw Zones & Tripwires onto Display Frame
-            self._draw_zones(display_frame, w, h)
-
-            # 3. AI Object Detection & ByteTrack Multi-Object Tracking
-            tracked_objects, raw_detections = self.detector.detect_and_track(work_frame)
-
-            # 4. Spatial Analytics & Facial/Vehicle Recognition
-            for track in tracked_objects:
-                x1, y1, x2, y2 = track.bbox
-                x1, y1 = max(0, x1), max(0, y1)
-                x2, y2 = min(w, x2), min(h, y2)
-                crop = work_frame[y1:y2, x1:x2]
-
-                # Spatial Analytics across defined zones
-                for zone in self.zones:
-                    z_coords = zone["coordinates"]
-                    z_type = zone["type"]
-                    z_name = zone["name"]
-                    z_sev = zone.get("severity", "HIGH")
-
-                    if z_type == "restricted_zone":
-                        is_inside = SpatialAnalyticsEngine.check_zone_intrusion(track, z_coords, w, h)
-                        if is_inside:
-                            incident_manager.trigger_incident(
-                                camera_id=self.camera_id,
-                                camera_name=self.camera_name,
-                                event_type="ZONE_INTRUSION",
-                                severity=z_sev,
-                                object_class=track.label,
-                                track_id=track.track_id,
-                                description=f"{track.label.capitalize()} (ID #{track.track_id}) intruded into restricted zone '{z_name}'",
-                                frame=display_frame,
-                                bounding_box=track.bbox,
-                                websocket_manager=self.websocket_manager
-                            )
-
-                    elif z_type == "virtual_tripwire":
-                        crossed = SpatialAnalyticsEngine.check_tripwire_crossing(track, z_coords, w, h)
-                        if crossed:
-                            incident_manager.trigger_incident(
-                                camera_id=self.camera_id,
-                                camera_name=self.camera_name,
-                                event_type="TRIPWIRE_CROSSING",
-                                severity="CRITICAL",
-                                object_class=track.label,
-                                track_id=track.track_id,
-                                description=f"{track.label.capitalize()} (ID #{track.track_id}) breached virtual tripwire '{z_name}'",
-                                frame=display_frame,
-                                bounding_box=track.bbox,
-                                websocket_manager=self.websocket_manager
-                            )
-
-                # ANPR for Vehicles
-                if track.label in ["car", "truck", "bus", "motorcycle"]:
-                    anpr_res = anpr_engine.extract_plate(crop)
-                    if anpr_res:
-                        plate_num = anpr_res["plate_number"]
-                        if anpr_res["is_flagged"]:
-                            incident_manager.trigger_incident(
-                                camera_id=self.camera_id,
-                                camera_name=self.camera_name,
-                                event_type="ANPR_HOTLIST_MATCH",
-                                severity="CRITICAL",
-                                object_class=track.label,
-                                track_id=track.track_id,
-                                description=f"Flagged vehicle plate detected: {plate_num} ({anpr_res['flag_reason']})",
-                                frame=display_frame,
-                                bounding_box=track.bbox,
-                                anpr_plate=plate_num,
-                                websocket_manager=self.websocket_manager
-                            )
-                        cv2.rectangle(display_frame, (x1, max(0, y1 - 22)), (x1 + 140, max(0, y1 - 4)), (15, 23, 42), -1)
-                        cv2.putText(display_frame, f"PLATE: {plate_num}", (x1 + 5, max(0, y1 - 8)),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 242, 254), 1)
-
-                # FRS for Persons
-                if track.label == "person":
-                    frs_res = frs_engine.detect_and_recognize(crop)
-                    if frs_res:
-                        p_name = frs_res["name"]
-                        p_status = frs_res["identity_status"]
-                        if p_status == "WATCHLISTED":
-                            incident_manager.trigger_incident(
-                                camera_id=self.camera_id,
-                                camera_name=self.camera_name,
-                                event_type="FRS_WATCHLIST_MATCH",
-                                severity="CRITICAL",
-                                object_class="person",
-                                track_id=track.track_id,
-                                description=f"Watchlisted person recognized: {p_name} ({frs_res['risk_level']} RISK)",
-                                frame=display_frame,
-                                bounding_box=track.bbox,
-                                face_name=p_name,
-                                websocket_manager=self.websocket_manager
-                            )
-                        f_color = (0, 0, 255) if p_status == "WATCHLISTED" else (0, 255, 120)
-                        cv2.putText(display_frame, f"FRS: {p_name}", (x1, y1 - 6),
-                                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, f_color, 2)
-
-                # Draw Bounding Box & Track ID Pill
-                box_color = (0, 242, 254) if track.label == "person" else (255, 184, 0)
-                cv2.rectangle(display_frame, (x1, y1), (x2, y2), box_color, 2)
-                label_str = f"#{track.track_id} {track.label.upper()} {int(track.confidence * 100)}%"
-                cv2.rectangle(display_frame, (x1, y2), (x1 + 160, y2 + 18), (15, 23, 42), -1)
-                cv2.putText(display_frame, label_str, (x1 + 4, y2 + 13),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.38, (255, 255, 255), 1)
-
-            # Store processed frame safely
+            display_frame = self.process_single_frame()
             with self.lock:
                 self.processed_frame = display_frame
-
             elapsed = time.time() - loop_start
-            sleep_time = max(0.001, (1.0 / 30.0) - elapsed)
-            time.sleep(sleep_time)
+            time.sleep(max(0.001, (1.0 / 30.0) - elapsed))
 
     def _draw_zones(self, frame: np.ndarray, w: int, h: int):
         for zone in self.zones:
@@ -310,9 +187,10 @@ class CameraStreamProcessor:
 
     def get_jpeg_frame(self) -> Optional[bytes]:
         with self.lock:
-            if self.processed_frame is None:
+            frame_to_encode = self.processed_frame if self.processed_frame is not None else self.process_single_frame()
+            if frame_to_encode is None:
                 return None
-            ret, jpeg = cv2.imencode('.jpg', self.processed_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 85])
+            ret, jpeg = cv2.imencode('.jpg', frame_to_encode, [int(cv2.IMWRITE_JPEG_QUALITY), 80])
             if not ret:
                 return None
             return jpeg.tobytes()
@@ -338,7 +216,6 @@ class StreamManager:
         Base.metadata.create_all(bind=engine)
         db: Session = SessionLocal()
         try:
-            # Re-seed cameras to match IBVAP C2 layout (6 cameras)
             db.query(CameraDB).delete()
             db.commit()
 
@@ -354,7 +231,6 @@ class StreamManager:
                 db.add(c)
             db.commit()
 
-            # Default zones
             db.query(ZoneDB).delete()
             default_zones = [
                 ZoneDB(id="z-bop-01", camera_id="cam-01", zone_name="Alpha Gate Tripwire", zone_type="virtual_tripwire", coordinates=json.dumps([[0.1, 0.55], [0.9, 0.55]]), severity="CRITICAL"),

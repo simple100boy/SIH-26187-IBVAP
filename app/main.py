@@ -19,22 +19,26 @@ from app.pipeline.stream_manager import stream_manager
 # Ensure database tables exist
 Base.metadata.create_all(bind=engine)
 
+# Check if executing in Vercel serverless environment
+IS_VERCEL = os.getenv("VERCEL") is not None or os.getenv("AWS_LAMBDA_FUNCTION_NAME") is not None
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("==================================================================")
     print(f"  Starting {APP_TITLE} (v{VERSION})")
-    print("  Initializing AI Video Analytics Pipeline & Camera Streams...")
+    print(f"  Environment: {'Vercel Serverless' if IS_VERCEL else 'Local Standalone'}")
     print("==================================================================")
 
-    # Attach WebSocket manager to stream pipeline
-    stream_manager.set_websocket_manager(ws_manager)
-    stream_manager.start_all()
+    # Only start background threads if running locally
+    if not IS_VERCEL:
+        stream_manager.set_websocket_manager(ws_manager)
+        stream_manager.start_all()
 
     yield
 
-    print("Shutting down Camera Stream Processors...")
-    stream_manager.stop_all()
-    print("IBVAP Platform shutdown complete.")
+    if not IS_VERCEL:
+        print("Shutting down Camera Stream Processors...")
+        stream_manager.stop_all()
 
 app = FastAPI(
     title=APP_TITLE,
